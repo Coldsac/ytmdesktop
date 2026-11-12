@@ -6,6 +6,7 @@ import { YTMViewSetupCompletionFlags, YTMViewSetupCompletionFlagsNames, YTMViewS
 import CompanionServer from "./integrations/companion-server";
 import CustomCSS from "./integrations/custom-css";
 import DiscordPresence from "./integrations/discord-presence";
+import DiscordVoice from "./integrations/discord-voice";
 import LastFM from "./integrations/last-fm";
 import NowPlayingNotifications from "./integrations/notifications";
 import VolumeRatio from "./integrations/volume-ratio";
@@ -104,7 +105,7 @@ integrationManager.on("enable-error", (integration, error) => {
     buttons: ["Okay"]
   });
 });
-integrationManager.createIntegrations([CompanionServer, DiscordPresence, LastFM, NowPlayingNotifications, VolumeRatio, CustomCSS, EnhancedMediaService]);
+integrationManager.createIntegrations([CompanionServer, DiscordPresence, DiscordVoice, LastFM, NowPlayingNotifications, VolumeRatio, CustomCSS, EnhancedMediaService]);
 integrationManager.runHook(IntegrationManagerHook.AppBeforeReady);
 
 let tray: Tray;

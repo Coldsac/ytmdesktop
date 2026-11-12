@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onBeforeMount, ref } from "vue";
+import { computed, onBeforeMount, ref } from "vue";
+import type { StoreSchema } from "~shared/store/schema";
 
 const props = defineProps({
   title: {
@@ -52,18 +53,66 @@ function restartApplicationForUpdate() {
 
 const ytmViewUnresponsive = ref<boolean>(false);
 const appUpdateDownloaded = ref<boolean>(false);
+const discordVoiceEnabled = ref(false);
+const discordVoiceReady = ref(false);
+const discordVoiceStatus = ref("");
+const discordVoiceDetail = ref("");
+
+function discordVoiceIsReady(integrations: StoreSchema["integrations"] | undefined) {
+  if (!integrations) return false;
+  return Boolean(integrations.discordVoiceBotToken) && /^\d{15,25}$/.test(integrations.discordVoiceUserId ?? "");
+}
+
+function toggleDiscordVoice() {
+  if (!discordVoiceReady.value) {
+    openSettingsWindow();
+    return;
+  }
+  const enabled = !discordVoiceEnabled.value;
+  discordVoiceEnabled.value = enabled;
+  if (!enabled) {
+    discordVoiceStatus.value = "";
+    discordVoiceDetail.value = "";
+  }
+  window.ytmd.store.set("integrations.discordVoiceEnabled", enabled);
+}
+
+const discordVoiceTitle = computed(() => {
+  if (!discordVoiceEnabled.value) {
+    return discordVoiceReady.value ? "Stream audio to Discord" : "Set up Discord streaming";
+  }
+  if (discordVoiceStatus.value === "error") return discordVoiceDetail.value || "Discord stream failed. Click to turn off";
+  if (discordVoiceStatus.value === "connecting") return "Connecting to Discord...";
+  if (discordVoiceStatus.value === "waiting") return "Waiting for you to join a voice channel. Click to turn off";
+  if (discordVoiceStatus.value === "live") return "Streaming to Discord. Click to turn off";
+  if (discordVoiceStatus.value === "paused") return "Discord bot is in your voice channel. Click to turn off";
+  return "Discord streaming is on. Click to turn off";
+});
 
 if (props.isMainWindow) {
   const memoryStore = window.ytmd.memoryStore;
+  const store = window.ytmd.store;
   
   onBeforeMount(async () => {
     ytmViewUnresponsive.value = (await memoryStore.get("ytmViewUnresponsive")) ?? false;
     appUpdateDownloaded.value = (await memoryStore.get("autoUpdaterDownloaded")) ?? false;
+    const integrations = (await store.get("integrations")) as StoreSchema["integrations"];
+    discordVoiceEnabled.value = integrations?.discordVoiceEnabled ?? false;
+    discordVoiceReady.value = discordVoiceIsReady(integrations);
+    discordVoiceStatus.value = String((await memoryStore.get("discordVoiceStatus")) ?? "");
+    discordVoiceDetail.value = String((await memoryStore.get("discordVoiceDetail")) ?? "");
   });
 
   memoryStore.onStateChanged(newState => {
     ytmViewUnresponsive.value = newState.ytmViewUnresponsive ?? false;
     appUpdateDownloaded.value = newState.autoUpdaterDownloaded ?? false;
+    discordVoiceStatus.value = newState.discordVoiceStatus ?? "";
+    discordVoiceDetail.value = newState.discordVoiceDetail ?? "";
+  });
+
+  store.onDidAnyChange(newState => {
+    discordVoiceEnabled.value = newState.integrations.discordVoiceEnabled ?? false;
+    discordVoiceReady.value = discordVoiceIsReady(newState.integrations);
   });
 }
 </script>
@@ -124,6 +173,22 @@ if (props.isMainWindow) {
           @click="navigateToDefault"
         >
           <span class="material-symbols-outlined">home</span>
+        </button>
+        <button
+          v-if="hasSettingsButton"
+          class="app-button"
+          :class="{
+            'discord-toggle-on': discordVoiceEnabled && discordVoiceStatus !== 'error',
+            'discord-toggle-live': discordVoiceEnabled && discordVoiceStatus === 'live',
+            'discord-toggle-error': discordVoiceEnabled && discordVoiceStatus === 'error'
+          }"
+          tabindex="3"
+          :title="discordVoiceTitle"
+          :aria-pressed="discordVoiceEnabled"
+          aria-label="Discord stream"
+          @click="toggleDiscordVoice"
+        >
+          <span class="material-symbols-outlined">headset_mic</span>
         </button>
         <button
           v-if="hasSettingsButton"
@@ -266,6 +331,28 @@ if (props.isMainWindow) {
 :deep(.app-button) > .material-symbols-outlined {
   font-size: 20px;
   color: #b4b4b4;
+}
+
+:deep(.discord-toggle-on) > .material-symbols-outlined {
+  font-variation-settings:
+    "FILL" 1,
+    "wght" 500,
+    "GRAD" 0,
+    "opsz" 28;
+  color: #5865f2;
+}
+
+:deep(.discord-toggle-live) > .material-symbols-outlined {
+  color: #3ba55d;
+}
+
+:deep(.discord-toggle-error) > .material-symbols-outlined {
+  font-variation-settings:
+    "FILL" 1,
+    "wght" 500,
+    "GRAD" 0,
+    "opsz" 28;
+  color: #f44336;
 }
 
 .app-buttons .divider {

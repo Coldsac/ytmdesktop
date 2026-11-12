@@ -53,6 +53,10 @@ export default class ConfigStore extends Service {
           companionServerAuthTokens: null,
           companionServerCORSWildcardEnabled: true,
           discordPresenceEnabled: false,
+          discordVoiceEnabled: false,
+          discordVoiceBotToken: null,
+          discordVoiceChannelId: "",
+          discordVoiceUserId: "",
           lastFMEnabled: false,
           enhancedMediaServiceEnabled: true
         },
@@ -152,6 +156,19 @@ export default class ConfigStore extends Service {
         }
       }
     });
+
+    if (!this.conf.has("integrations.discordVoiceEnabled")) {
+      this.conf.set("integrations.discordVoiceEnabled", false);
+    }
+    if (!this.conf.has("integrations.discordVoiceBotToken")) {
+      this.conf.set("integrations.discordVoiceBotToken", null);
+    }
+    if (!this.conf.has("integrations.discordVoiceChannelId")) {
+      this.conf.set("integrations.discordVoiceChannelId", "");
+    }
+    if (!this.conf.has("integrations.discordVoiceUserId")) {
+      this.conf.set("integrations.discordVoiceUserId", "");
+    }
 
     if (this.conf.get("general.disableHardwareAcceleration")) {
       app.disableHardwareAcceleration();

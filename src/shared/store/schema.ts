@@ -35,6 +35,10 @@ export type StoreSchema = {
     companionServerAuthTokens: string | null; // array[object] | Encrypted for security
     companionServerCORSWildcardEnabled: boolean;
     discordPresenceEnabled: boolean;
+    discordVoiceEnabled: boolean;
+    discordVoiceBotToken: string | null;
+    discordVoiceChannelId: string;
+    discordVoiceUserId: string;
     lastFMEnabled: boolean;
     enhancedMediaServiceEnabled: boolean;
   };
@@ -69,6 +73,8 @@ export type StoreSchema = {
 
 export type MemoryStoreSchema = {
   discordPresenceConnectionFailed: boolean;
+  discordVoiceStatus: string;
+  discordVoiceDetail: string;
 
   shortcutsPlayPauseRegisterFailed: boolean;
   shortcutsNextRegisterFailed: boolean;

@@ -56,6 +56,7 @@ declare global {
       requestWindowState(): void;
 
       // App specific
+      openDiscordVoiceInvite(): Promise<"opened" | "missing" | "invalid">;
       getAppVersion(): Promise<string>;
       checkForUpdates(): void;
       handleCheckingForUpdate(callback: () => void);

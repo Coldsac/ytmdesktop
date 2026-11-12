@@ -127,6 +127,11 @@ export default class ProtocolManager extends Service {
         rootPath = path.resolve(process.resourcesPath, `app.asar/.vite/renderer/windows/changelog`);
         break;
       }
+
+      case "discord-voice": {
+        rootPath = path.resolve(process.resourcesPath, `app.asar/.vite/renderer/windows/discord-voice`);
+        break;
+      }
     }
 
     log.debug(`${req.method} ytmd-app://${host}${pathname}`);

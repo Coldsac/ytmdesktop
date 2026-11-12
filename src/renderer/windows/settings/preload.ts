@@ -52,6 +52,7 @@ contextBridge.exposeInMainWorld("ytmd", {
   getTrueFilePath: (file: File) => webUtils.getPathForFile(file),
 
   lastFMStepAuthenticate: () => ipcRenderer.send("lastfm:authenticate"),
+  openDiscordVoiceInvite: (): Promise<"opened" | "missing" | "invalid"> => ipcRenderer.invoke("discordVoice:openInvite"),
 
   processVersions: { electron: process.versions.electron, chrome: process.versions.chrome }
 });

@@ -9,7 +9,7 @@ export default defineConfig(config => {
         build: {
             outDir: ".vite/main",
             rolldownOptions: {
-                external: ["xosms"]
+                external: ["xosms", "discord.js", "@discordjs/voice", "opusscript", "libsodium-wrappers", "@snazzah/davey"]
             }
         },
         define: {

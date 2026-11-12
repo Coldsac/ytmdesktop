@@ -46,6 +46,10 @@ export default defineConfig({
           root,
           "src/renderer/windows/changelog/index.html",
         ),
+        discord_voice_window: path.resolve(
+          root,
+          "src/renderer/windows/discord-voice/index.html",
+        ),
       },
       output: {
         codeSplitting: {

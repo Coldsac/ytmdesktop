@@ -6,8 +6,62 @@ import { MakerRpm } from '@electron-forge/maker-rpm';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
+import { createRequire } from "node:module";
+import { existsSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+
+const require = createRequire(__filename);
+
+function packageDirectory(name: string): string | null {
+  const directManifest = path.join(__dirname, "node_modules", name, "package.json");
+  if (existsSync(directManifest)) {
+    const manifest = JSON.parse(readFileSync(directManifest, "utf8")) as { name?: string };
+    if (manifest.name === name) return path.dirname(directManifest);
+  }
+
+  try {
+    let dir = path.dirname(require.resolve(name));
+    while (true) {
+      const manifestPath = path.join(dir, "package.json");
+      if (existsSync(manifestPath)) {
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { name?: string };
+        if (manifest.name === name) return dir;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) return null;
+      dir = parent;
+    }
+  } catch {
+    return null;
+  }
+}
+
+function collectRuntimePackages(roots: string[]): Map<string, string> {
+  const found = new Map<string, string>();
+  const queue = [...roots];
+  while (queue.length > 0) {
+    const name = queue.pop();
+    if (!name || name.startsWith("@types/") || found.has(name)) continue;
+
+    const dir = packageDirectory(name);
+    if (!dir) continue;
+    found.set(name, dir);
+
+    const manifest = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")) as {
+      dependencies?: Record<string, string>;
+      optionalDependencies?: Record<string, string>;
+      peerDependencies?: Record<string, string>;
+    };
+    const deps = {
+      ...manifest.dependencies,
+      ...manifest.optionalDependencies,
+      ...manifest.peerDependencies
+    };
+    queue.push(...Object.keys(deps));
+  }
+  return found;
+}
 
 const config: ForgeConfig = {
   packagerConfig: {
@@ -33,7 +87,9 @@ const config: ForgeConfig = {
       }
     ],
     appCategoryType: "public.app-category.music",
-    asar: true
+    asar: {
+      unpack: "**/*.{node,dll}"
+    }
   },
   rebuildConfig: {},
   makers: [
@@ -115,6 +171,11 @@ const config: ForgeConfig = {
           entry: "src/renderer/ytmview/preload.ts",
           config: "config/vite/preload/ytmview.ts",
           target: "preload"
+        },
+        {
+          entry: "src/renderer/windows/discord-voice/preload.ts",
+          config: "config/vite/preload/discord_voice_window.ts",
+          target: "preload"
         }
       ],
       renderer: [
@@ -153,18 +214,41 @@ const config: ForgeConfig = {
             return ""
         }
       })()
-      const pkgs = ["xosms", `@xosms/xosms-${platform}-${arch}${xosmsPlatformSuffix}`];
+      const daveyPlatform = (() => {
+        if (platform === "win32" && arch === "x64") return "@snazzah/davey-win32-x64-msvc";
+        if (platform === "win32" && arch === "arm64") return "@snazzah/davey-win32-arm64-msvc";
+        if (platform === "win32" && arch === "ia32") return "@snazzah/davey-win32-ia32-msvc";
+        if (platform === "darwin" && arch === "arm64") return "@snazzah/davey-darwin-arm64";
+        if (platform === "darwin") return "@snazzah/davey-darwin-x64";
+        if (platform === "linux" && arch === "arm64") return "@snazzah/davey-linux-arm64-gnu";
+        if (platform === "linux") return "@snazzah/davey-linux-x64-gnu";
+        return null;
+      })();
+      const roots = [
+        "xosms",
+        `@xosms/xosms-${platform}-${arch}${xosmsPlatformSuffix}`,
+        "discord.js",
+        "@discordjs/voice",
+        "opusscript",
+        "libsodium-wrappers",
+        "@snazzah/davey",
+        daveyPlatform
+      ].filter((pkg): pkg is string => pkg !== null);
+      const packages = collectRuntimePackages(roots);
+      console.log(`Copying ${packages.size} runtime packages into the app`);
 
       await Promise.all(
-        pkgs.map(async pkg => {
-          const src = path.join(srcRoot, pkg);
+        [...packages.entries()].map(async ([pkg, src]) => {
           const dest = path.join(destRoot, pkg);
-
-          if ((await fs.stat(src)).isDirectory()) {
-            await fs.cp(src, dest, { dereference: true, recursive: true });
-          }
+          await fs.cp(src, dest, {
+            dereference: true,
+            recursive: true,
+            filter: source => !path.relative(src, source).split(path.sep).includes("node_modules")
+          });
         })
-      )
+      );
+
+      void srcRoot;
     }
   }
 };

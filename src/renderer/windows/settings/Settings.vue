@@ -62,6 +62,11 @@ const companionServerAuthTokens = ref<AuthToken[]>(
 );
 const companionServerCORSWildcardEnabled = ref<boolean>(integrations.companionServerCORSWildcardEnabled);
 const discordPresenceEnabled = ref<boolean>(integrations.discordPresenceEnabled);
+const discordVoiceEnabled = ref<boolean>(integrations.discordVoiceEnabled ?? false);
+const discordVoiceTokenInput = ref<string>("");
+const discordVoiceTokenSaved = ref<boolean>(Boolean(integrations.discordVoiceBotToken));
+const discordVoiceUserId = ref<string>(integrations.discordVoiceUserId ?? "");
+const discordVoiceInviteHint = ref<string>("");
 const lastFMEnabled = ref<boolean>(integrations.lastFMEnabled);
 const enhancedMediaServiceEnabled = ref<boolean>(integrations.enhancedMediaServiceEnabled);
 
@@ -104,6 +109,9 @@ store.onDidAnyChange(async newState => {
     : [];
   companionServerCORSWildcardEnabled.value = newState.integrations.companionServerCORSWildcardEnabled;
   discordPresenceEnabled.value = newState.integrations.discordPresenceEnabled;
+  discordVoiceEnabled.value = newState.integrations.discordVoiceEnabled ?? false;
+  discordVoiceTokenSaved.value = Boolean(newState.integrations.discordVoiceBotToken);
+  discordVoiceUserId.value = newState.integrations.discordVoiceUserId ?? "";
   lastFMEnabled.value = newState.integrations.lastFMEnabled;
   lastFMSessionKey.value = newState.lastfm.sessionKey;
   scrobblePercent.value = newState.lastfm.scrobblePercent;
@@ -122,6 +130,8 @@ store.onDidAnyChange(async newState => {
 });
 
 const discordPresenceConnectionFailed = ref<boolean>(await memoryStore.get("discordPresenceConnectionFailed"));
+const discordVoiceStatus = ref<string>(String((await memoryStore.get("discordVoiceStatus")) ?? ""));
+const discordVoiceDetail = ref<string>(String((await memoryStore.get("discordVoiceDetail")) ?? ""));
 
 const shortcutsPlayPauseRegisterFailed = ref<boolean>(await memoryStore.get("shortcutsPlayPauseRegisterFailed"));
 const shortcutsNextRegisterFailed = ref<boolean>(await memoryStore.get("shortcutsNextRegisterFailed"));
@@ -142,6 +152,8 @@ const lastFMAuthenticationStep = ref<number>(await memoryStore.get("lastFMAuthen
 
 memoryStore.onStateChanged(newState => {
   discordPresenceConnectionFailed.value = newState.discordPresenceConnectionFailed;
+  discordVoiceStatus.value = newState.discordVoiceStatus ?? "";
+  discordVoiceDetail.value = newState.discordVoiceDetail ?? "";
 
   shortcutsPlayPauseRegisterFailed.value = newState.shortcutsPlayPauseRegisterFailed;
   shortcutsNextRegisterFailed.value = newState.shortcutsNextRegisterFailed;
@@ -192,6 +204,8 @@ async function settingsChanged() {
   store.set("integrations.companionServerEnabled", companionServerEnabled.value);
   store.set("integrations.companionServerCORSWildcardEnabled", companionServerCORSWildcardEnabled.value);
   store.set("integrations.discordPresenceEnabled", discordPresenceEnabled.value);
+  store.set("integrations.discordVoiceEnabled", discordVoiceEnabled.value);
+  store.set("integrations.discordVoiceUserId", discordVoiceUserId.value.trim());
   store.set("integrations.lastFMEnabled", lastFMEnabled.value);
   store.set("lastfm.scrobblePercent", scrobblePercent.value);
   store.set("integrations.enhancedMediaServiceEnabled", enhancedMediaServiceEnabled.value);
@@ -231,6 +245,53 @@ async function restartDiscordPresence() {
   await settingsChanged();
   discordPresenceEnabled.value = true;
   await settingsChanged();
+}
+
+async function saveDiscordVoiceToken() {
+  const token = discordVoiceTokenInput.value.trim();
+  if (!token) return;
+  store.set("integrations.discordVoiceBotToken", await safeStorage.encryptString(token));
+  discordVoiceTokenInput.value = "";
+  discordVoiceTokenSaved.value = true;
+  discordVoiceInviteHint.value = "";
+}
+
+async function clearDiscordVoiceToken() {
+  discordVoiceTokenInput.value = "";
+  discordVoiceTokenSaved.value = false;
+  discordVoiceInviteHint.value = "";
+  store.set("integrations.discordVoiceBotToken", null);
+}
+
+async function openDiscordVoiceInvite() {
+  const result = await window.ytmd.openDiscordVoiceInvite();
+  if (result === "opened") discordVoiceInviteHint.value = "";
+  else if (result === "invalid") discordVoiceInviteHint.value = "The saved token is not a bot token. Paste it again.";
+  else discordVoiceInviteHint.value = "Save a bot token first.";
+}
+
+async function restartDiscordVoice() {
+  discordVoiceEnabled.value = false;
+  await settingsChanged();
+  discordVoiceEnabled.value = true;
+  await settingsChanged();
+}
+
+function discordVoiceStatusText(status: string) {
+  switch (status) {
+    case "connecting":
+      return "Connecting to Discord...";
+    case "waiting":
+      return "Join a voice channel and the bot will follow you. This app keeps playing until then.";
+    case "live":
+      return "Streaming to your voice channel. This app stays silent.";
+    case "paused":
+      return "In your voice channel. This app stays silent until you turn streaming off.";
+    case "error":
+      return "Not streaming.";
+    default:
+      return "";
+  }
 }
 
 async function deleteCompanionAuthToken(appId: string) {
@@ -547,6 +608,87 @@ function stepLastFMAuth() {
               Discord connection could not be established after 30 attempts
             </p>
             <button @click="restartDiscordPresence">
+              Retry
+            </button>
+          </div>
+          <YTMDSetting
+            v-model="discordVoiceEnabled"
+            type="checkbox"
+            name="Stream audio to Discord"
+            description="Plays YouTube Music through a bot you own, in whatever voice channel you are in. The app stays silent while the bot is connected. Create a bot at discord.com/developers/applications, invite it to your server with Connect and Speak, then paste its token and your user ID."
+            beta
+            :disabled="!safeStorageAvailable"
+            disabled-message="This integration cannot be enabled due to safeStorage being unavailable"
+            @change="settingsChanged"
+          />
+          <div
+            v-if="discordVoiceEnabled"
+            class="discord-voice-config"
+          >
+            <label>
+              Bot token
+              <input
+                v-model="discordVoiceTokenInput"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Paste a bot token"
+                @change="saveDiscordVoiceToken"
+              >
+            </label>
+            <p class="description">
+              {{ discordVoiceTokenSaved ? "A token is saved. Paste a new one to replace it." : "No token saved yet." }}
+            </p>
+            <div class="discord-voice-actions">
+              <button @click="saveDiscordVoiceToken">
+                Save token
+              </button>
+              <button
+                v-if="discordVoiceTokenSaved"
+                @click="clearDiscordVoiceToken"
+              >
+                Remove token
+              </button>
+              <button @click="openDiscordVoiceInvite">
+                Invite bot
+              </button>
+            </div>
+            <p
+              v-if="discordVoiceInviteHint"
+              class="discord-failure"
+            >
+              {{ discordVoiceInviteHint }}
+            </p>
+            <label>
+              Your Discord user ID
+              <input
+                v-model="discordVoiceUserId"
+                type="text"
+                inputmode="numeric"
+                spellcheck="false"
+                placeholder="Right-click your name, then Copy User ID"
+                @change="settingsChanged"
+              >
+            </label>
+            <p class="description">
+              Enable Developer Mode in Discord under Settings, Advanced. Right-click your username and choose Copy User ID. The bot joins the voice channel you are in and moves with you. Set that channel's bitrate to 128 kbps or higher so the music stays clear.
+            </p>
+            <p
+              v-if="!discordVoiceDetail && discordVoiceStatusText(discordVoiceStatus)"
+              class="description"
+            >
+              {{ discordVoiceStatusText(discordVoiceStatus) }}
+            </p>
+            <p
+              v-if="discordVoiceDetail"
+              class="discord-failure"
+            >
+              {{ discordVoiceDetail }}
+            </p>
+            <button
+              v-if="discordVoiceStatus === 'error'"
+              @click="restartDiscordVoice"
+            >
               Retry
             </button>
           </div>
@@ -1138,6 +1280,38 @@ function stepLastFMAuth() {
 .discord-failure {
   margin: 0;
   color: #969696;
+}
+
+.discord-voice-config {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 12px 12px;
+  padding-left: 12px;
+  border-left: 1px solid #212121;
+}
+
+.discord-voice-config label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.discord-voice-config input {
+  background-color: #212121;
+  color: #ffffff;
+  border: none;
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.discord-voice-config .description {
+  margin: 0;
+  color: #969696;
+}
+
+.discord-voice-actions {
+  display: flex;
 }
 
 button {
