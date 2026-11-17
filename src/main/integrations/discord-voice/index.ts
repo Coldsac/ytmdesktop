@@ -131,6 +131,7 @@ export default class DiscordVoice extends Integration {
   private player: AudioPlayer | null = null;
   private resource: AudioResource | null = null;
   private pcmStream: PassThrough | null = null;
+  private playbackBitrate = MIN_MUSIC_BITRATE;
   private droppingPcm = false;
   private outputEnabled = false;
   private captureHost: WebContents | null = null;
@@ -257,13 +258,13 @@ export default class DiscordVoice extends Integration {
       if (session !== this.generation) return;
       this.voice = voice;
 
-      this.pcmStream = new PassThrough({ highWaterMark: PCM_HIGH_WATER_MARK });
-      this.player = voice.createAudioPlayer();
-      this.resource = voice.createAudioResource(this.pcmStream, {
-        inputType: voice.StreamType.Raw,
-        inlineVolume: false
+      this.player = voice.createAudioPlayer({
+        behaviors: {
+          // A file would end after a short gap. This is a live tap, so keep the player open and send silence.
+          maxMissedFrames: 1_000_000
+        }
       });
-      if (this.resource.encoder) configureMusicEncoder(this.resource.encoder, MIN_MUSIC_BITRATE);
+      this.openPlaybackResource();
       this.player.on("error", error => {
         log.error("Discord voice player error", redact(error, token));
         this.setStatus("error", redact(error, token));
@@ -544,8 +545,8 @@ export default class DiscordVoice extends Integration {
 
     if (this.resource?.encoder) {
       const channelBitrate = "bitrate" in channel && typeof channel.bitrate === "number" ? channel.bitrate : MIN_MUSIC_BITRATE;
-      const applied = configureMusicEncoder(this.resource.encoder, channelBitrate);
-      log.info(`Discord voice encoding music at ${Math.round(applied / 1000)} kbps`);
+      this.playbackBitrate = configureMusicEncoder(this.resource.encoder, channelBitrate);
+      log.info(`Discord voice encoding music at ${Math.round(this.playbackBitrate / 1000)} kbps`);
     }
 
     const { ChannelType } = await import("discord.js");
@@ -561,31 +562,60 @@ export default class DiscordVoice extends Integration {
     if (!this.currentFollow(session, attempt) && this.connection === connection) this.dropConnection();
   }
 
+  private openPlaybackResource() {
+    const voice = this.voice;
+    if (!voice) return null;
+    const previous = this.pcmStream;
+    this.droppingPcm = false;
+    this.pcmStream = new PassThrough({ highWaterMark: PCM_HIGH_WATER_MARK });
+    previous?.destroy();
+    const resource = voice.createAudioResource(this.pcmStream, {
+      inputType: voice.StreamType.Raw,
+      inlineVolume: false
+    });
+    if (resource.encoder) configureMusicEncoder(resource.encoder, this.playbackBitrate);
+    this.resource = resource;
+    return resource;
+  }
+
   private applyPlayback(state: PlayerState) {
-    const output = shouldOutput(state);
-    if (output !== this.outputEnabled) this.sendToCaptureHost("discordVoice:setOutput", output);
-    this.outputEnabled = output;
-    if (!output) this.discardBufferedPcm();
-    this.updatePresence(state);
+    try {
+      const output = shouldOutput(state);
+      if (output !== this.outputEnabled) this.sendToCaptureHost("discordVoice:setOutput", output);
+      this.outputEnabled = output;
+      if (!output) this.discardBufferedPcm();
+      this.updatePresence(state);
 
-    if (this.player && this.resource && this.voice) {
-      const status = this.player.state.status;
-      if (output) {
-        if (status === this.voice.AudioPlayerStatus.Idle) this.player.play(this.resource);
-        else if (status === this.voice.AudioPlayerStatus.Paused) this.player.unpause();
-      } else if (status === this.voice.AudioPlayerStatus.Playing) {
-        this.player.pause();
+      const player = this.player;
+      const voice = this.voice;
+      if (player && voice) {
+        const status = player.state.status;
+        if (output) {
+          const resourceEnded = !this.resource || this.resource.ended;
+          if (status === voice.AudioPlayerStatus.Idle || resourceEnded) {
+            const resource = resourceEnded ? this.openPlaybackResource() : this.resource;
+            if (resource && !resource.ended) player.play(resource);
+          } else if (status === voice.AudioPlayerStatus.Paused) {
+            player.unpause();
+          }
+        } else if (status === voice.AudioPlayerStatus.Playing) {
+          player.pause();
+        }
       }
-    }
 
-    if (this.connection?.state.status === this.voice?.VoiceConnectionStatus.Ready) {
-      this.setStatus(output ? "live" : "paused", this.status === "error" ? "" : this.detail);
+      if (this.connection?.state.status === voice?.VoiceConnectionStatus.Ready) {
+        this.setStatus(output ? "live" : "paused", this.status === "error" ? "" : this.detail);
+      }
+    } catch (error) {
+      const message = redact(error, null);
+      log.error("Discord voice playback failed", message);
+      this.setStatus("error", message);
     }
   }
 
   private discardBufferedPcm() {
     const stream = this.pcmStream;
-    if (!stream) return;
+    if (!stream || stream.destroyed) return;
     while (stream.read() !== null) continue;
   }
 
@@ -759,6 +789,7 @@ export default class DiscordVoice extends Integration {
     this.resource = null;
     this.pcmStream = null;
     this.voice = null;
+    this.playbackBitrate = MIN_MUSIC_BITRATE;
     this.followedUserId = "";
     this.desiredChannelId = null;
     this.startupSettled = false;
