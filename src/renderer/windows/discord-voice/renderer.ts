@@ -2,37 +2,35 @@ const WORKLET_SOURCE = `
 class PcmProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.pending = new Int16Array(0);
-    this.targetFrames = 1920;
-  }
-
-  append(samples) {
-    const next = new Int16Array(this.pending.length + samples.length);
-    next.set(this.pending, 0);
-    next.set(samples, this.pending.length);
-    this.pending = next;
+    this.targetSamples = 1920 * 2;
+    this.ring = new Int16Array(this.targetSamples + 256);
+    this.write = 0;
+    this.emit = false;
+    this.port.onmessage = (event) => {
+      this.emit = event.data === "emit";
+      if (!this.emit) this.write = 0;
+    };
   }
 
   process(inputs) {
     const channels = inputs[0];
     if (!channels || channels.length === 0 || !channels[0]) return true;
+    if (!this.emit) return true;
 
     const left = channels[0];
     const right = channels[1] || channels[0];
-    const pcm = new Int16Array(left.length * 2);
     for (let i = 0; i < left.length; i++) {
       const l = Math.max(-1, Math.min(1, left[i]));
       const r = Math.max(-1, Math.min(1, right[i] || 0));
-      pcm[i * 2] = l < 0 ? l * 0x8000 : l * 0x7fff;
-      pcm[i * 2 + 1] = r < 0 ? r * 0x8000 : r * 0x7fff;
-    }
-    this.append(pcm);
-
-    const targetSamples = this.targetFrames * 2;
-    if (this.pending.length >= targetSamples) {
-      const chunk = this.pending.slice(0, targetSamples);
-      this.pending = this.pending.slice(targetSamples);
-      this.port.postMessage(chunk);
+      this.ring[this.write++] = l < 0 ? l * 0x8000 : l * 0x7fff;
+      this.ring[this.write++] = r < 0 ? r * 0x8000 : r * 0x7fff;
+      if (this.write >= this.targetSamples) {
+        const chunk = this.ring.slice(0, this.targetSamples);
+        const extra = this.write - this.targetSamples;
+        if (extra > 0) this.ring.copyWithin(0, this.targetSamples, this.write);
+        this.write = extra;
+        this.port.postMessage(chunk, [chunk.buffer]);
+      }
     }
     return true;
   }
@@ -43,11 +41,13 @@ registerProcessor("ytmd-pcm", PcmProcessor);
 
 declare global {
   interface Window {
-    discordVoice: {
+    discordVoice?: {
       sendPcm(bytes: Uint8Array): void;
       reportError(message: string): void;
       reportStarted(): void;
       onRecapture(callback: () => void): void;
+      onSetActive(callback: (active: boolean) => void): void;
+      onSetOutput(callback: (emit: boolean) => void): void;
     };
   }
 }
@@ -58,6 +58,7 @@ let currentStream: MediaStream | null = null;
 let source: MediaStreamAudioSourceNode | null = null;
 let workletNode: AudioWorkletNode | null = null;
 let sink: GainNode | null = null;
+let emitPcm = false;
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -86,11 +87,24 @@ function stopGraph() {
   currentStream?.getTracks().forEach(track => track.stop());
   currentStream = null;
   source?.disconnect();
+  workletNode?.port.close();
   workletNode?.disconnect();
   sink?.disconnect();
   source = null;
   workletNode = null;
   sink = null;
+}
+
+async function closeContext() {
+  stopGraph();
+  const context = audioContext;
+  audioContext = null;
+  if (!context) return;
+  try {
+    await context.close();
+  } catch {
+    // The context is already closed.
+  }
 }
 
 const musicAudioConstraints: MediaTrackConstraints = {
@@ -106,16 +120,26 @@ const musicAudioConstraints: MediaTrackConstraints = {
 
 async function ensureContext() {
   if (!audioContext) {
-    audioContext = new AudioContext({ sampleRate: 48000, latencyHint: "playback" });
+    audioContext = new AudioContext({ sampleRate: 48000, latencyHint: "interactive" });
     const moduleUrl = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: "text/javascript" }));
-    await audioContext.audioWorklet.addModule(moduleUrl);
-    URL.revokeObjectURL(moduleUrl);
+    try {
+      await audioContext.audioWorklet.addModule(moduleUrl);
+    } finally {
+      URL.revokeObjectURL(moduleUrl);
+    }
   }
   if (audioContext.state === "suspended") await audioContext.resume();
   return audioContext;
 }
 
+function setWorkletEmit(emit: boolean) {
+  emitPcm = emit;
+  workletNode?.port.postMessage(emit ? "emit" : "drop");
+}
+
 async function captureOnce(id: number) {
+  const bridge = window.discordVoice;
+  if (!bridge) return;
   const stream = await navigator.mediaDevices.getDisplayMedia({
     audio: musicAudioConstraints,
     video: {
@@ -163,14 +187,15 @@ async function captureOnce(id: number) {
   source.connect(workletNode);
   workletNode.connect(sink);
   sink.connect(context.destination);
+  setWorkletEmit(emitPcm);
 
   workletNode.port.onmessage = (event: MessageEvent<Int16Array>) => {
-    if (id !== runId || !(event.data instanceof Int16Array)) return;
+    if (id !== runId || !emitPcm || !(event.data instanceof Int16Array)) return;
     const pcm = resampleStereo(event.data, context.sampleRate);
-    window.discordVoice.sendPcm(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength));
+    window.discordVoice?.sendPcm(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength));
   };
 
-  window.discordVoice.reportStarted();
+  bridge.reportStarted();
 
   await new Promise<void>(resolve => {
     audioTracks[0].addEventListener("ended", () => resolve(), { once: true });
@@ -189,15 +214,26 @@ async function start() {
       if (id !== runId) return;
       stopGraph();
       const message = error instanceof Error ? error.message : "Could not capture YouTube Music audio.";
-      window.discordVoice.reportError(message);
+      window.discordVoice?.reportError(message);
       await delay(2000);
     }
   }
 }
 
-window.discordVoice.onRecapture(() => {
-  void start();
-});
-void start();
+function stop() {
+  runId++;
+  void closeContext();
+}
 
-export {};
+export function attachDiscordCapture() {
+  const bridge = window.discordVoice;
+  if (!bridge?.onSetActive) return;
+  bridge.onSetOutput(emit => setWorkletEmit(emit));
+  bridge.onRecapture(() => {
+    void start();
+  });
+  bridge.onSetActive(active => {
+    if (active) void start();
+    else stop();
+  });
+}

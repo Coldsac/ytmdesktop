@@ -10,6 +10,24 @@ import { WindowsEventArguments } from "~shared/types";
 const memoryStore = new MemoryStore<MemoryStoreSchema>();
 const store = new Store<StoreSchema>();
 
+let captureActive = false;
+let captureEmit = false;
+let setCaptureActive: ((active: boolean) => void) | null = null;
+let setCaptureOutput: ((emit: boolean) => void) | null = null;
+let recapture: (() => void) | null = null;
+
+ipcRenderer.on("discordVoice:setActive", (_event, active: boolean) => {
+  captureActive = Boolean(active);
+  setCaptureActive?.(captureActive);
+});
+ipcRenderer.on("discordVoice:setOutput", (_event, emit: boolean) => {
+  captureEmit = Boolean(emit);
+  setCaptureOutput?.(captureEmit);
+});
+ipcRenderer.on("discordVoice:recapture", () => {
+  recapture?.();
+});
+
 contextBridge.exposeInMainWorld("ytmd", {
   minimizeWindow: () => ipcRenderer.send("windowControls:minimize"),
   maximizeWindow: () => ipcRenderer.send("windowControls:maximize"),
@@ -40,5 +58,22 @@ contextBridge.exposeInMainWorld("ytmd", {
     get: async (key: keyof StoreSchema) => await store.get(key),
     reset: (key: keyof StoreSchema) => store.reset(key),
     onDidAnyChange: (callback: (newState: StoreSchema, oldState: StoreSchema) => void) => store.onDidAnyChange(callback)
+  }
+});
+
+contextBridge.exposeInMainWorld("discordVoice", {
+  sendPcm: (bytes: Uint8Array) => ipcRenderer.send("discordVoice:pcm", bytes),
+  reportError: (message: string) => ipcRenderer.send("discordVoice:captureError", message),
+  reportStarted: () => ipcRenderer.send("discordVoice:captureStarted"),
+  onRecapture: (callback: () => void) => {
+    recapture = callback;
+  },
+  onSetActive: (callback: (active: boolean) => void) => {
+    setCaptureActive = callback;
+    callback(captureActive);
+  },
+  onSetOutput: (callback: (emit: boolean) => void) => {
+    setCaptureOutput = callback;
+    callback(captureEmit);
   }
 });

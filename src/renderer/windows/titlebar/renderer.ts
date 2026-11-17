@@ -31,6 +31,8 @@ import "~assets/app.css";
 
 import { createApp } from "vue";
 import App from "./Index.vue";
+import { attachDiscordCapture } from "../discord-voice/renderer";
 
 const app = createApp(App);
 app.mount("#app");
+attachDiscordCapture();

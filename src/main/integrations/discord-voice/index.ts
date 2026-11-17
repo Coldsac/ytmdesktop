@@ -1,6 +1,5 @@
-import { app, BrowserWindow, ipcMain, IpcMainEvent, safeStorage, session, shell } from "electron";
+import { ipcMain, IpcMainEvent, safeStorage, session, shell, type WebContents } from "electron";
 import { PassThrough } from "node:stream";
-import path from "node:path";
 import type { Client, Guild, VoiceBasedChannel, VoiceState } from "discord.js";
 import type { AudioPlayer, AudioResource, VoiceConnection } from "@discordjs/voice";
 import log from "electron-log";
@@ -9,12 +8,11 @@ import ConfigStore from "../../services/configstore";
 import MemoryStore from "../../services/memorystore";
 import PlayerStateStore from "../../services/playerstatestore";
 import YTMViewManager from "../../services/ytmviewmanager";
+import AppWindowManager from "../../services/windowmanager";
 import { MemoryStoreSchema } from "~shared/store/schema";
 import { PlayerState, VideoState } from "~shared/playerstatestore/types";
 
-declare const ALL_WINDOWS_VITE_DEV_SERVER_URL: string;
-
-const PCM_HIGH_WATER_MARK = 48000 * 2 * 2;
+const PCM_HIGH_WATER_MARK = 48000 * 2 * 2 * 0.2;
 const MIN_MUSIC_BITRATE = 128_000;
 const MAX_MUSIC_BITRATE = 384_000;
 
@@ -114,6 +112,10 @@ function shouldOutput(state: PlayerState) {
   return state.trackState === VideoState.Playing && !state.muted && !state.adPlaying;
 }
 
+function isCaptureHostFrame(url: string) {
+  return url.startsWith("ytmd-app://titlebar") || url.includes("/windows/titlebar/");
+}
+
 export default class DiscordVoice extends Integration {
   public name = "DiscordVoice";
   public storeEnableProperty: Integration["storeEnableProperty"] = "integrations.discordVoiceEnabled";
@@ -131,7 +133,12 @@ export default class DiscordVoice extends Integration {
   private pcmStream: PassThrough | null = null;
   private droppingPcm = false;
   private outputEnabled = false;
-  private captureWindow: BrowserWindow | null = null;
+  private captureHost: WebContents | null = null;
+  private cacheTimer: ReturnType<typeof setInterval> | null = null;
+  private onCaptureHostLoaded = () => {
+    this.sendToCaptureHost("discordVoice:setOutput", this.outputEnabled);
+    this.sendToCaptureHost("discordVoice:setActive", true);
+  };
   private stateCallback: ((state: PlayerState) => void) | null = null;
   private viewRecreated: (() => void) | null = null;
   private status = "";
@@ -186,7 +193,7 @@ export default class DiscordVoice extends Integration {
   }
 
   private onPcm = (event: IpcMainEvent, payload: Uint8Array) => {
-    if (!this.captureWindow || event.sender.id !== this.captureWindow.webContents.id) return;
+    if (!this.captureHost || event.sender.id !== this.captureHost.id) return;
     if (!this.outputEnabled || !this.pcmStream || this.droppingPcm) return;
     if (!(payload instanceof Uint8Array) || payload.byteLength === 0) return;
 
@@ -201,13 +208,13 @@ export default class DiscordVoice extends Integration {
   };
 
   private onCaptureError = (event: IpcMainEvent, message: unknown) => {
-    if (!this.captureWindow || event.sender.id !== this.captureWindow.webContents.id) return;
+    if (!this.captureHost || event.sender.id !== this.captureHost.id) return;
     if (typeof message !== "string" || message.length === 0) return;
     this.setStatus(this.outputEnabled ? "live" : this.status || "paused", message.slice(0, 300));
   };
 
   private onCaptureStarted = (event: IpcMainEvent) => {
-    if (!this.captureWindow || event.sender.id !== this.captureWindow.webContents.id) return;
+    if (!this.captureHost || event.sender.id !== this.captureHost.id) return;
     if (!this.connection) return;
     this.setStatus(this.outputEnabled ? "live" : "paused", "");
   };
@@ -266,9 +273,42 @@ export default class DiscordVoice extends Integration {
       ipcMain.on("discordVoice:captureError", this.onCaptureError);
       ipcMain.on("discordVoice:captureStarted", this.onCaptureStarted);
 
+      const clientRef: { current: Client | null } = { current: null };
+      const keepUser = (id: string) => id === userId || id === clientRef.current?.user?.id;
       const client = new discord.Client({
-        intents: [discord.GatewayIntentBits.Guilds, discord.GatewayIntentBits.GuildVoiceStates]
+        intents: [discord.GatewayIntentBits.Guilds, discord.GatewayIntentBits.GuildVoiceStates],
+        // The bot only needs guilds, voice channels, and one user's voice state.
+        // Everything else in a GUILD_CREATE payload is dropped instead of cached.
+        makeCache: discord.Options.cacheWithLimits({
+          MessageManager: 0,
+          PresenceManager: 0,
+          ReactionManager: 0,
+          ReactionUserManager: 0,
+          GuildEmojiManager: 0,
+          GuildStickerManager: 0,
+          GuildBanManager: 0,
+          GuildInviteManager: 0,
+          GuildScheduledEventManager: 0,
+          StageInstanceManager: 0,
+          ThreadManager: 0,
+          ThreadMemberManager: 0,
+          AutoModerationRuleManager: 0,
+          EntitlementManager: 0,
+          VoiceStateManager: {
+            maxSize: 0,
+            keepOverLimit: (state: { id: string }) => state.id === userId
+          },
+          GuildMemberManager: {
+            maxSize: 0,
+            keepOverLimit: (member: { id: string }) => member.id === clientRef.current?.user?.id
+          },
+          UserManager: {
+            maxSize: 0,
+            keepOverLimit: (cachedUser: { id: string }) => keepUser(cachedUser.id)
+          }
+        })
       });
+      clientRef.current = client;
       this.client = client;
       // login() resolves on the gateway READY payload, before guild voice states exist.
       // Initial guilds emit guildAvailable, not guildCreate, and only after that payload.
@@ -290,9 +330,12 @@ export default class DiscordVoice extends Integration {
 
       const ytmViewManager = this.getService(YTMViewManager);
       this.viewRecreated = () => {
-        this.captureWindow?.webContents.send("discordVoice:recapture");
+        this.sendToCaptureHost("discordVoice:recapture");
       };
       ytmViewManager.on("view-recreated", this.viewRecreated);
+
+      this.trimDiscordCache();
+      this.cacheTimer = setInterval(() => this.trimDiscordCache(), 60_000);
 
       this.startupSettled = true;
       this.syncDesiredChannelFromCache();
@@ -421,7 +464,7 @@ export default class DiscordVoice extends Integration {
       current.state.status === voice.VoiceConnectionStatus.Ready
     );
     if (settled) {
-      if (!this.captureWindow) await this.startCapture();
+      if (!this.captureHost) await this.startCapture();
       if (!this.currentFollow(session, attempt)) return;
       this.applyPlayback(this.getService(PlayerStateStore).getState());
       return;
@@ -430,7 +473,7 @@ export default class DiscordVoice extends Integration {
     this.setStatus("connecting", "");
     await this.joinChannel(session, attempt, voice, channel);
     if (!this.currentFollow(session, attempt) || this.connection?.state.status !== voice.VoiceConnectionStatus.Ready) return;
-    if (!this.captureWindow) await this.startCapture();
+    if (!this.captureHost) await this.startCapture();
     if (!this.currentFollow(session, attempt)) return;
     this.applyPlayback(this.getService(PlayerStateStore).getState());
   }
@@ -520,6 +563,7 @@ export default class DiscordVoice extends Integration {
 
   private applyPlayback(state: PlayerState) {
     const output = shouldOutput(state);
+    if (output !== this.outputEnabled) this.sendToCaptureHost("discordVoice:setOutput", output);
     this.outputEnabled = output;
     if (!output) this.discardBufferedPcm();
     this.updatePresence(state);
@@ -556,17 +600,41 @@ export default class DiscordVoice extends Integration {
     });
   }
 
+  private captureHostContents() {
+    const windows = this.getService(AppWindowManager);
+    if (!windows.hasWindow("Main")) return null;
+    const contents = windows.getWindow("Main").webContents;
+    if (!contents || contents.isDestroyed()) return null;
+    return contents;
+  }
+
+  private sendToCaptureHost(channel: string, ...args: unknown[]) {
+    const host = this.captureHost;
+    if (!host || host.isDestroyed()) return;
+    host.send(channel, ...args);
+  }
+
   private async startCapture() {
     this.installDisplayMediaHandler();
-    await this.openCaptureWindow();
+    const host = this.captureHostContents();
+    if (!host) throw new Error("The main window is not available to capture audio.");
+    // Capture runs in the title bar, which is already open. A second window was a full Chromium process.
+    host.setBackgroundThrottling(false);
+    host.removeListener("did-finish-load", this.onCaptureHostLoaded);
+    host.on("did-finish-load", this.onCaptureHostLoaded);
+    this.captureHost = host;
+    host.send("discordVoice:setOutput", this.outputEnabled);
+    host.send("discordVoice:setActive", true);
   }
 
   private stopCapture() {
     session.defaultSession.setDisplayMediaRequestHandler(null);
-    if (this.captureWindow && !this.captureWindow.isDestroyed()) {
-      this.captureWindow.destroy();
-    }
-    this.captureWindow = null;
+    const host = this.captureHost;
+    this.captureHost = null;
+    if (!host || host.isDestroyed()) return;
+    host.removeListener("did-finish-load", this.onCaptureHostLoaded);
+    host.send("discordVoice:setActive", false);
+    host.setBackgroundThrottling(true);
   }
 
   private dropConnection() {
@@ -603,9 +671,9 @@ export default class DiscordVoice extends Integration {
   private installDisplayMediaHandler() {
     session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
       const frameUrl = request.frame?.url ?? "";
-      const fromCaptureWindow = frameUrl.includes("/windows/discord-voice/") || frameUrl.startsWith("ytmd-app://discord-voice");
+      const fromCaptureHost = isCaptureHostFrame(frameUrl);
       const ytmContents = this.getService(YTMViewManager).getView()?.webContents;
-      if (!fromCaptureWindow || !ytmContents || ytmContents.isDestroyed() || !ytmContents.mainFrame) {
+      if (!fromCaptureHost || !ytmContents || ytmContents.isDestroyed() || !ytmContents.mainFrame) {
         callback(null);
         return;
       }
@@ -620,44 +688,53 @@ export default class DiscordVoice extends Integration {
     });
   }
 
-  private async openCaptureWindow() {
-    const url = app.isPackaged
-      ? "ytmd-app://discord-voice"
-      : ALL_WINDOWS_VITE_DEV_SERVER_URL + "/windows/discord-voice/index.html";
+  private trimDiscordCache() {
+    const client = this.client;
+    if (!client) return;
+    const keepUsers = new Set<string>();
+    if (client.user?.id) keepUsers.add(client.user.id);
+    if (this.followedUserId) keepUsers.add(this.followedUserId);
 
-    const captureWindow = new BrowserWindow({
-      show: false,
-      width: 320,
-      height: 180,
-      x: 0,
-      y: 0,
-      opacity: 0,
-      skipTaskbar: true,
-      focusable: false,
-      frame: false,
-      minimizable: false,
-      maximizable: false,
-      webPreferences: {
-        sandbox: true,
-        contextIsolation: true,
-        backgroundThrottling: false,
-        preload: path.join(__dirname, "../preload/windows/discord-voice/preload.cjs"),
-        devTools: false
+    for (const [id] of client.users.cache) {
+      if (!keepUsers.has(id)) client.users.cache.delete(id);
+    }
+
+    for (const guild of client.guilds.cache.values()) {
+      for (const [id] of guild.voiceStates.cache) {
+        if (id !== this.followedUserId) guild.voiceStates.cache.delete(id);
       }
-    });
-    this.captureWindow = captureWindow;
-    captureWindow.webContents.setBackgroundThrottling(false);
-    captureWindow.on("closed", () => {
-      if (this.captureWindow === captureWindow) this.captureWindow = null;
-    });
-    await captureWindow.loadURL(url);
-    if (!captureWindow.isDestroyed()) captureWindow.showInactive();
+      const me = client.user?.id;
+      for (const [id] of guild.members.cache) {
+        if (id !== me) guild.members.cache.delete(id);
+      }
+      guild.presences.cache.clear();
+      guild.emojis.cache.clear();
+      guild.stickers.cache.clear();
+      guild.stageInstances.cache.clear();
+      guild.scheduledEvents.cache.clear();
+
+      const keepChannels = new Set<string>();
+      for (const channel of guild.channels.cache.values()) {
+        if (typeof channel.isVoiceBased !== "function" || !channel.isVoiceBased()) continue;
+        keepChannels.add(channel.id);
+        if ("parentId" in channel && typeof channel.parentId === "string") keepChannels.add(channel.parentId);
+      }
+      for (const [id] of guild.channels.cache) {
+        if (keepChannels.has(id)) continue;
+        guild.channels.cache.delete(id);
+        client.channels.cache.delete(id);
+      }
+    }
   }
 
   private stopResources() {
     this.outputEnabled = false;
     this.presenceKey = "";
     this.droppingPcm = false;
+    if (this.cacheTimer) {
+      clearInterval(this.cacheTimer);
+      this.cacheTimer = null;
+    }
 
     ipcMain.removeListener("discordVoice:pcm", this.onPcm);
     ipcMain.removeListener("discordVoice:captureError", this.onCaptureError);
