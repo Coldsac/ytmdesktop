@@ -17,7 +17,8 @@ declare global {
         decryptString(value: string): string;
         encryptString(value: string): Buffer;
       };
-      openSettingsWindow(): void;
+      openSettingsWindow(tab?: string): void;
+      onShowSettingsTab(callback: (tab: string) => void): void;
       restartApplication(): void;
       restartApplicationForUpdate(): void;
       getTrueFilePath(file: File): string;

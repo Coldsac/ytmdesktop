@@ -41,7 +41,7 @@ contextBridge.exposeInMainWorld("ytmd", {
 
   isMainWindow: () => process.argv.includes("is-main-window"),
 
-  openSettingsWindow: () => ipcRenderer.send("window:openSettings"),
+  openSettingsWindow: (tab?: string) => ipcRenderer.send("window:openSettings", tab),
   openMiniplayerWindow: () => ipcRenderer.send("window:openMiniplayer"),
   switchFocus: (context: string) => ipcRenderer.send("ytmView:switchFocus", context),
   ytmViewNavigateDefault: () => ipcRenderer.send("ytmView:navigateDefault"),

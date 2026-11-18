@@ -53,6 +53,9 @@ contextBridge.exposeInMainWorld("ytmd", {
 
   lastFMStepAuthenticate: () => ipcRenderer.send("lastfm:authenticate"),
   openDiscordVoiceInvite: (): Promise<"opened" | "missing" | "invalid"> => ipcRenderer.invoke("discordVoice:openInvite"),
+  onShowSettingsTab: (callback: (tab: string) => void) => {
+    ipcRenderer.on("settings:showTab", (_event, tab: string) => callback(tab));
+  },
 
   processVersions: { electron: process.versions.electron, chrome: process.versions.chrome }
 });

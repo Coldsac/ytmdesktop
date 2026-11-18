@@ -327,18 +327,22 @@ app.on("ready", async () => {
     }
   });
 
-  mainWindow.ipcOn("window:openSettings", () => {
+  mainWindow.ipcOn("window:openSettings", (_event, tab?: unknown) => {
+    const settingsTab = tab === "discord" ? "discord" : undefined;
     if (windowManager.hasWindow("Settings")) {
-      windowManager.getWindow("Settings").showAndFocus();
+      const settingsWindow = windowManager.getWindow("Settings");
+      settingsWindow.showAndFocus();
+      if (settingsTab) settingsWindow.webContents?.send("settings:showTab", settingsTab);
       return;
     }
 
     const mainWindowBounds = mainWindow._getElectronWindow().getBounds();
+    const settingsUrl = app.isPackaged ? "ytmd-app://settings" : ALL_WINDOWS_VITE_DEV_SERVER_URL + "/windows/settings/index.html";
     const settingsWindow = windowManager.createWindow("Browser", {
       name: "Settings",
       autoRecreate: false,
       waitForViews: true,
-      url: app.isPackaged ? "ytmd-app://settings" : ALL_WINDOWS_VITE_DEV_SERVER_URL + "/windows/settings/index.html",
+      url: settingsTab ? `${settingsUrl}#${settingsTab}` : settingsUrl,
       electronOptions: {
         width: 800,
         height: 600,

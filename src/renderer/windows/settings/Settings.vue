@@ -18,7 +18,10 @@ const processVersions = window.ytmd.processVersions;
 const isDarwin = window.ytmd.isDarwin;
 const isLinux = window.ytmd.isLinux;
 
-const currentTab = ref(1);
+const currentTab = ref(window.location.hash === "#discord" ? 6 : 1);
+window.ytmd.onShowSettingsTab?.(tab => {
+  if (tab === "discord") currentTab.value = 6;
+});
 const requiresRestart = ref(false);
 const checkingForUpdate = ref(false);
 const updateAvailable = ref(await window.ytmd.isAppUpdateAvailable());
@@ -366,6 +369,12 @@ function stepLastFMAuth() {
           <span class="material-symbols-outlined">wifi_tethering</span>Integrations
         </li>
         <li
+          :class="{ active: currentTab === 6 }"
+          @click="changeTab(6)"
+        >
+          <span class="material-symbols-outlined">headset_mic</span>Discord stream
+        </li>
+        <li
           :class="{ active: currentTab === 5 }"
           @click="changeTab(5)"
         >
@@ -612,6 +621,89 @@ function stepLastFMAuth() {
             </button>
           </div>
           <YTMDSetting
+            v-model="lastFMEnabled"
+            type="checkbox"
+            name="Last.fm scrobbling"
+            :disabled="!safeStorageAvailable"
+            disabled-message="This integration cannot be enabled due to safeStorage being unavailable"
+            @change="settingsChanged"
+          />
+          <div
+            v-if="lastFMEnabled"
+            class="setting indented"
+          >
+            <div class="name-with-description">
+              <p class="description">
+                User is Authenticated:
+                <span
+                  v-if="lastFMSessionKey"
+                  style="color: #4caf50"
+                >Yes</span>
+                <span
+                  v-else
+                  style="color: #ff1100"
+                >No</span>
+              </p>
+            </div>
+            <button
+              v-if="lastFMSessionKey"
+              @click="logoutLastFM"
+            >
+              Logout
+            </button>
+          </div>
+          <div
+            v-if="lastFMEnabled && lastFMAuthenticationStep === 0"
+            class="setting indented"
+          >
+            <p>
+              Continue setup in your browser then come back here when you're done
+            </p>
+            <button @click="stepLastFMAuth">
+              Authorize Last.fm in browser
+            </button>
+          </div>
+          <div
+            v-if="lastFMEnabled && lastFMAuthenticationStep === 1"
+            class="setting indented"
+          >
+            <p>
+              After you're done in the browser click "Finish Last.fm authentication"
+            </p>
+            <button @click="stepLastFMAuth">
+              Finish Last.fm authentication
+            </button>
+          </div>
+          <YTMDSetting
+            v-if="lastFMEnabled"
+            v-model="scrobblePercent"
+            class="settings indented"
+            type="range"
+            name="Scrobble percent"
+            description="Determines when a song is scrobbled"
+            min="50"
+            max="95"
+            step="5"
+            @change="settingsChanged"
+          />
+          <YTMDSetting
+            v-model="enhancedMediaServiceEnabled"
+            type="checkbox"
+            restart-required
+            name="Enhanced media service"
+            description="An enhanced media service that can provide better media button controls"
+            :disabled="isDarwin"
+            disabled-message="This integration is not available on your platform"
+            beta
+            @change="settingChangedRequiresRestart"
+          />
+        </div>
+
+        <div
+          v-if="currentTab === 6"
+          class="discord-stream-tab"
+        >
+          <YTMDSetting
             v-model="discordVoiceEnabled"
             type="checkbox"
             name="Stream audio to Discord"
@@ -692,83 +784,6 @@ function stepLastFMAuth() {
               Retry
             </button>
           </div>
-          <YTMDSetting
-            v-model="lastFMEnabled"
-            type="checkbox"
-            name="Last.fm scrobbling"
-            :disabled="!safeStorageAvailable"
-            disabled-message="This integration cannot be enabled due to safeStorage being unavailable"
-            @change="settingsChanged"
-          />
-          <div
-            v-if="lastFMEnabled"
-            class="setting indented"
-          >
-            <div class="name-with-description">
-              <p class="description">
-                User is Authenticated:
-                <span
-                  v-if="lastFMSessionKey"
-                  style="color: #4caf50"
-                >Yes</span>
-                <span
-                  v-else
-                  style="color: #ff1100"
-                >No</span>
-              </p>
-            </div>
-            <button
-              v-if="lastFMSessionKey"
-              @click="logoutLastFM"
-            >
-              Logout
-            </button>
-          </div>
-          <div
-            v-if="lastFMEnabled && lastFMAuthenticationStep === 0"
-            class="setting indented"
-          >
-            <p>
-              Continue setup in your browser then come back here when you're done
-            </p>
-            <button @click="stepLastFMAuth">
-              Authorize Last.fm in browser
-            </button>
-          </div>
-          <div
-            v-if="lastFMEnabled && lastFMAuthenticationStep === 1"
-            class="setting indented"
-          >
-            <p>
-              After you're done in the browser click "Finish Last.fm authentication"
-            </p>
-            <button @click="stepLastFMAuth">
-              Finish Last.fm authentication
-            </button>
-          </div>
-          <YTMDSetting
-            v-if="lastFMEnabled"
-            v-model="scrobblePercent"
-            class="settings indented"
-            type="range"
-            name="Scrobble percent"
-            description="Determines when a song is scrobbled"
-            min="50"
-            max="95"
-            step="5"
-            @change="settingsChanged"
-          />
-          <YTMDSetting
-            v-model="enhancedMediaServiceEnabled"
-            type="checkbox"
-            restart-required
-            name="Enhanced media service"
-            description="An enhanced media service that can provide better media button controls"
-            :disabled="isDarwin"
-            disabled-message="This integration is not available on your platform"
-            beta
-            @change="settingChangedRequiresRestart"
-          />
         </div>
 
         <div
@@ -1282,13 +1297,17 @@ function stepLastFMAuth() {
   color: #969696;
 }
 
+.discord-stream-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .discord-voice-config {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  margin: 4px 0 12px 12px;
-  padding-left: 12px;
-  border-left: 1px solid #212121;
+  margin: 4px 0 12px;
 }
 
 .discord-voice-config label {

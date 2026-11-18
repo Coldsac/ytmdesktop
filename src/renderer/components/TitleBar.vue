@@ -65,7 +65,7 @@ function discordVoiceIsReady(integrations: StoreSchema["integrations"] | undefin
 
 function toggleDiscordVoice() {
   if (!discordVoiceReady.value) {
-    openSettingsWindow();
+    openSettingsWindow("discord");
     return;
   }
   const enabled = !discordVoiceEnabled.value;
